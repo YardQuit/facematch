@@ -1,0 +1,75 @@
+# Builds the AppImage from a version tag and publishes it with its SHA256SUMS.
+#
+# Only a tag is ever built: what is compared with should be a release, the
+# same file for everyone, its checksum published beside it. The tag must be
+# the version facematch.py says it is, so that --version and the release
+# never disagree.
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+# Read by default: the build runs third-party installers, and only the
+# publishing job needs to write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: The tag is the version
+        run: |
+          version=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' facematch.py)
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME but facematch.py says $version."
+            exit 1
+          fi
+
+      - name: Build
+        run: ./build-appimage.sh
+
+      - name: Run it
+        run: |
+          said=$(build/facematch-x86_64.AppImage --appimage-extract-and-run --version)
+          echo "$said"
+          [ "$said" = "facematch $GITHUB_REF_NAME" ]
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: appimage
+          path: build/facematch-x86_64.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimage
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum facematch-x86_64.AppImage > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" facematch-x86_64.AppImage SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "facematch $GITHUB_REF_NAME" \
+            --notes "The AppImage and its SHA-256. What changed: CHANGELOG.md."
